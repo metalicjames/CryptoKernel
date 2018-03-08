@@ -3,6 +3,7 @@
 #include "version.h"
 
 #include <list>
+#include <iterator>
 
 CryptoKernel::Network::Network(CryptoKernel::Log* log,
                                CryptoKernel::Blockchain* blockchain,
@@ -174,10 +175,12 @@ void CryptoKernel::Network::peerFunc() {
             std::lock_guard<std::recursive_mutex> lock(connectedMutex);
             std::unique_ptr<Storage::Transaction> dbTx(networkdb->begin());
 
-	    std::set<std::string> removals;
+            std::set<std::string> removals;
 
-	    for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
-                    it != connected.end(); it++) {
+            this->bestHeight = this->currentHeight;
+
+            for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
+                        it != connected.end(); it++) {
                 try {
                     const Json::Value info = it->second->peer->getInfo();
                     try {
@@ -186,6 +189,15 @@ void CryptoKernel::Network::peerFunc() {
                             log->printf(LOG_LEVEL_WARN,
                                         "Network(): " + it->first + " has a different major version than us");
                             throw Peer::NetworkError();
+                        }
+
+                        const auto banIt = banned.find(it->first);
+                        if(banIt != banned.end()) {
+                            if(banIt->second > static_cast<uint64_t>(std::time(nullptr))) {
+                                log->printf(LOG_LEVEL_WARN,
+                                            "Network(): Disconnecting " + it->first + " for being banned");
+                                throw Peer::NetworkError();
+                            }
                         }
 
                         it->second->info["height"] = info["tipHeight"].asUInt64();
@@ -206,6 +218,10 @@ void CryptoKernel::Network::peerFunc() {
                                 throw Peer::NetworkError();
                             }
                         }
+
+                        if(it->second->info["height"].asUInt64() > this->bestHeight) {
+                            this->bestHeight = it->second->info["height"].asUInt64();
+                        }
                     } catch(const Json::Exception& e) {
                         changeScore(it->first, 50);
                         throw Peer::NetworkError();
@@ -215,17 +231,17 @@ void CryptoKernel::Network::peerFunc() {
                     it->second->info["lastseen"] = result;
                 } catch(const Peer::NetworkError& e) {
                     log->printf(LOG_LEVEL_WARN,
-                                "Network(): Failed to contact " + it->first + ", disconnecting it");
+                                "Network(): Error with " + it->first + ", disconnecting it");
                     removals.insert(it->first);
                 }
             }
 
-	    for(const auto& peer : removals) {
-            const auto it = connected.find(peer);
-            if(it != connected.end()) {
-                connected.erase(it);
+            for(const auto& peer : removals) {
+                const auto it = connected.find(peer);
+                if(it != connected.end()) {
+                    connected.erase(it);
+                }
             }
-	    }
 
             for(const auto& peer : peerInfos) {
                 peers->put(dbTx.get(), peer.first, peer.second);
@@ -247,152 +263,128 @@ void CryptoKernel::Network::networkFunc() {
     bool failure = false;
     uint64_t currentHeight = blockchain->getBlockDB("tip").getHeight();
     this->currentHeight = currentHeight;
-    uint64_t bestHeight = currentHeight;
-    uint64_t startHeight = currentHeight;
-
+    
     while(running) {
-        //Determine best chain
-        connectedMutex.lock();
-        for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
-                it != connected.end(); it++) {
-            if(it->second->info["height"].asUInt64() > bestHeight) {
-                bestHeight = it->second->info["height"].asUInt64();
-            }
-            const auto banIt = banned.find(it->first);
-            if(banIt != banned.end()) {
-                if(banIt->second > static_cast<uint64_t>(std::time(nullptr))) {
-                    log->printf(LOG_LEVEL_WARN,
-                                "Network(): Disconnecting " + it->first + " for being banned");
-                    it = connected.erase(it);
-                    if(connected.size() < 1) {
-                        break;
-                    }
-                }
-            }
-        }
+        auto nUsablePeers = 0;
+        std::string peerIp;
+        std::list<CryptoKernel::Blockchain::block> blocks;
 
-        if(this->currentHeight > bestHeight) {
-            bestHeight = this->currentHeight;
-        }
-        this->bestHeight = bestHeight;
-        connectedMutex.unlock();
+        this->currentHeight = blockchain->getBlockDB("tip").getHeight();
+        if(currentHeight < this->currentHeight) {
+            currentHeight = this->currentHeight;
+        } 
 
         log->printf(LOG_LEVEL_INFO,
                     "Network(): Current height: " + std::to_string(currentHeight) + ", best height: " +
                     std::to_string(bestHeight));
 
         //Detect if we are behind
-        if(bestHeight > currentHeight) {
-            connectedMutex.lock();
+        if(this->bestHeight > currentHeight) {
+            std::lock_guard<std::recursive_mutex> lock(connectedMutex);
 
-            for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
-                    it != connected.end() && running; it++) {
-                if(it->second->info["height"].asUInt64() > currentHeight) {
-                    std::list<CryptoKernel::Blockchain::block> blocks;
+            std::list<std::string> usablePeers;
+            for(const auto& peer : connected) {
+                if(peer.second->info["height"].asUInt64() > currentHeight) {
+                    usablePeers.insert(usablePeers.end(), peer.first);
+                }
+            }
 
-                    if(currentHeight == startHeight) {
+            nUsablePeers = usablePeers.size();
+            if(nUsablePeers >= 1) {
+                // Pick a peer
+                auto peerIps = usablePeers.begin();
+                std::advance(peerIps, std::time(nullptr) % usablePeers.size());
+                peerIp = *peerIps;
+
+                const auto& peer = connected[peerIp];
+
+                try {
+                    if(!blockProcessor) {
                         auto nBlocks = 0;
                         do {
                             log->printf(LOG_LEVEL_INFO,
                                         "Network(): Downloading blocks " + std::to_string(currentHeight + 1) + " to " +
                                         std::to_string(currentHeight + 6));
-                            try {
-                                const auto newBlocks = it->second->peer->getBlocks(currentHeight + 1, currentHeight + 6);
-                                nBlocks = newBlocks.size();
-                                blocks.insert(blocks.end(), newBlocks.rbegin(), newBlocks.rend());
-                            } catch(Peer::NetworkError& e) {
-                                log->printf(LOG_LEVEL_WARN,
-                                            "Network(): Failed to contact " + it->first + " " + e.what() +
-                                            " while downloading blocks");
-                                break;
-                            }
+
+                            const auto newBlocks = peer->peer->getBlocks(currentHeight + 1, currentHeight + 6);
+                            nBlocks = newBlocks.size();
+                            blocks.insert(blocks.end(), newBlocks.rbegin(), newBlocks.rend());
 
                             try {
                                 blockchain->getBlockDB(blocks.rbegin()->getPreviousBlockId().toString());
                             } catch(const CryptoKernel::Blockchain::NotFoundException& e) {
                                 if(currentHeight == 1) {
                                     // This peer has a different genesis block to us
-                                    changeScore(it->first, 250);
-                                    break;
+                                    changeScore(peerIp, 250);
+                                    throw Peer::NetworkError();
                                 } else {
                                     currentHeight = std::max(1, (int)currentHeight - nBlocks);
                                     continue;
                                 }
                             }
 
+                            currentHeight += nBlocks;
+
                             break;
                         } while(running);
-
-                        currentHeight += nBlocks;
                     }
 
                     while(blocks.size() < 2000 && running && currentHeight < bestHeight) {
                         log->printf(LOG_LEVEL_INFO,
                                     "Network(): Downloading blocks " + std::to_string(currentHeight + 1) + " to " +
                                     std::to_string(currentHeight + 6));
+                    
+                        const auto newBlocks = peer->peer->getBlocks(currentHeight + 1, currentHeight + 6);
+                        blocks.insert(blocks.begin(), newBlocks.rbegin(), newBlocks.rend());
 
-                        auto nBlocks = 0;
-                        try {
-                            const auto newBlocks = it->second->peer->getBlocks(currentHeight + 1, currentHeight + 6);
-                            nBlocks = newBlocks.size();
-                            blocks.insert(blocks.begin(), newBlocks.rbegin(), newBlocks.rend());
-                        } catch(Peer::NetworkError& e) {
-                            log->printf(LOG_LEVEL_WARN,
-                                        "Network(): Failed to contact " + it->first + " " + e.what() +
-                                        " while downloading blocks");
-                            break;
-                        }
+                        currentHeight += newBlocks.size();
 
-                        currentHeight = std::min(currentHeight + nBlocks, bestHeight);
-                    }
-
-                    if(blockProcessor) {
-                        blockProcessor->join();
-                        blockProcessor.reset();
-
-                        currentHeight = blockchain->getBlockDB("tip").getHeight();
-                        this->currentHeight = currentHeight;
-
-                        if(failure) {
-                            blocks.clear();
-                            startHeight = currentHeight;
-                            bestHeight = currentHeight;
-                            break;
-                        }
-
-                        if(currentHeight == bestHeight) {
+                        if(newBlocks.empty()) {
                             break;
                         }
                     }
-
-                    blockProcessor.reset(new std::thread([&, blocks](const std::string& peer){
-                        failure = false;
-
-                        for(auto rit = blocks.rbegin(); rit != blocks.rend(); ++rit) {
-                            const auto blockResult = blockchain->submitBlock(*rit);
-
-                            if(std::get<1>(blockResult)) {
-                                changeScore(peer, 50);
-                            }
-
-                            if(!std::get<0>(blockResult)) {
-                                failure = true;
-                                break;
-                            }
-                        }
-                    }, it->first));
+                } catch(const Peer::NetworkError& e) {
+                        log->printf(LOG_LEVEL_WARN,
+                                    "Network(): Error with " + peerIp + " " + e.what() +
+                                    " while downloading blocks");
                 }
             }
-
-            connectedMutex.unlock();
         }
 
-        if(bestHeight <= currentHeight || connected.size() == 0) {
+        if(blockProcessor) {
+            blockProcessor->join();
+            blockProcessor.reset();
+            
+            if(failure) {
+                continue;
+            }
+        }
+
+        if(blocks.size() > 0) {
+            blockProcessor.reset(new std::thread([&, blocks](const std::string& peer){
+                failure = false;
+
+                for(auto rit = blocks.rbegin(); rit != blocks.rend(); ++rit) {
+                    const auto blockResult = blockchain->submitBlock(*rit);
+
+                    if(std::get<1>(blockResult)) {
+                        connectedMutex.lock();
+                        if(connected.find(peer) != connected.end()) {
+                            changeScore(peer, 50);
+                        }
+                        connectedMutex.unlock();
+                    }
+
+                    if(!std::get<0>(blockResult)) {
+                        failure = true;
+                        break;
+                    }
+                }
+            }, peerIp));
+        }
+
+        if(bestHeight <= currentHeight || nUsablePeers <= 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20000));
-            currentHeight = blockchain->getBlockDB("tip").getHeight();
-            startHeight = currentHeight;
-            bestHeight = currentHeight;
-            this->currentHeight = currentHeight;
         }
     }
 }
@@ -485,6 +477,7 @@ unsigned int CryptoKernel::Network::getConnections() {
 
 void CryptoKernel::Network::broadcastTransactions(const
         std::vector<CryptoKernel::Blockchain::transaction> transactions) {
+    //std::lock_guard<std::recursive_mutex> lock(connectedMutex);
     for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
             it != connected.end(); it++) {
         try {
@@ -496,6 +489,7 @@ void CryptoKernel::Network::broadcastTransactions(const
 }
 
 void CryptoKernel::Network::broadcastBlock(const CryptoKernel::Blockchain::block block) {
+    //std::lock_guard<std::recursive_mutex> lock(connectedMutex);
     for(std::map<std::string, std::unique_ptr<PeerInfo>>::iterator it = connected.begin();
             it != connected.end(); it++) {
         try {
@@ -524,6 +518,7 @@ void CryptoKernel::Network::changeScore(const std::string& url, const uint64_t s
 }
 
 std::set<std::string> CryptoKernel::Network::getConnectedPeers() {
+    //std::lock_guard<std::recursive_mutex> lock(connectedMutex);
     std::set<std::string> peerUrls;
     for(const auto& peer : connected) {
         peerUrls.insert(peer.first);
