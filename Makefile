@@ -4,7 +4,7 @@ ifeq ($(UNAME), Linux)
 LUA_INCDIR ?= /usr/include/lua5.3
 LUA_LIBDIR ?= /usr/lib
 LIBFLAGS   ?= -shared
-BINFLAGS   ?= -I. -L. -L/usr/local/lib -Wl,-rpath -Wl,./ -lck -llua5.3 -lcrypto -ldl -pthread -lleveldb -lmicrohttpd -ljsonrpccpp-common -ljsonrpccpp-server -ljsonrpccpp-client -lcurl -lgcov -ljsoncpp -lsfml-system -lsfml-network
+BINFLAGS   ?= -I. -L. -L/usr/local/lib -Wl,-rpath -Wl,./ -lck -llua5.3 -lcrypto -ldl -pthread -lleveldb -lmicrohttpd -ljsonrpccpp-common -ljsonrpccpp-server -ljsonrpccpp-client -lcurl -lgcov -ljsoncpp -lsfml-system -lsfml-network -lcschnorr
 PLATFORMCXXFLAGS ?= -fPIC
 CKLIB ?= libck.so
 CKBIN ?= ckd
@@ -53,7 +53,7 @@ endif
 
 KERNELCXXFLAGS += -g -Wall -std=c++14 -Og -Wl,-E -Isrc/kernel
 
-KERNELSRC = src/kernel/blockchain.cpp src/kernel/blockchaintypes.cpp src/kernel/math.cpp src/kernel/storage.cpp src/kernel/network.cpp src/kernel/networkpeer.cpp src/kernel/base64.cpp src/kernel/crypto.cpp src/kernel/log.cpp src/kernel/contract.cpp src/kernel/consensus/AVRR.cpp src/kernel/consensus/PoW.cpp src/kernel/merkletree.cpp
+KERNELSRC = src/kernel/blockchain.cpp src/kernel/blockchaintypes.cpp src/kernel/math.cpp src/kernel/storage.cpp src/kernel/network.cpp src/kernel/networkpeer.cpp src/kernel/base64.cpp src/kernel/crypto.cpp src/kernel/schnorr.cpp src/kernel/log.cpp src/kernel/contract.cpp src/kernel/consensus/AVRR.cpp src/kernel/consensus/PoW.cpp src/kernel/merkletree.cpp
 KERNELOBJS = $(KERNELSRC:.cpp=.cpp.o)
 
 LYRASRC = src/kernel/consensus/Lyra2REv2/Lyra2RE.c src/kernel/consensus/Lyra2REv2/Lyra2.c src/kernel/consensus/Lyra2REv2/Sponge.c src/kernel/consensus/Lyra2REv2/sha3/blake.c src/kernel/consensus/Lyra2REv2/sha3/cubehash.c src/kernel/consensus/Lyra2REv2/sha3/keccak.c src/kernel/consensus/Lyra2REv2/sha3/skein.c src/kernel/consensus/Lyra2REv2/sha3/bmw.c
@@ -62,7 +62,7 @@ LYRAOBJS = $(LYRASRC:.c=.c.o)
 CLIENTSRC = src/client/main.cpp src/client/rpcserver.cpp src/client/wallet.cpp src/client/httpserver.cpp src/client/multicoin.cpp
 CLIENTOBJS = $(CLIENTSRC:.cpp=.cpp.o)
 
-TESTSRC = tests/CryptoKernelTestRunner.cpp tests/CryptoTests.cpp tests/MathTests.cpp tests/MerkletreeTests.cpp tests/StorageTests.cpp tests/LogTests.cpp
+TESTSRC = tests/CryptoKernelTestRunner.cpp tests/CryptoTests.cpp tests/SchnorrTests.cpp tests/MathTests.cpp tests/MerkletreeTests.cpp tests/StorageTests.cpp tests/LogTests.cpp
 TESTOBJS = $(TESTSRC:.cpp=.cpp.o)
 
 CXXFLAGS = $(KERNELCXXFLAGS) $(PLATFORMCXXFLAGS) -I$(LUA_INCDIR)
