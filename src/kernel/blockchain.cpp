@@ -383,7 +383,11 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitTransaction(Storage::Tran
 
 std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transaction* dbTx,
         const block& Block, bool genesisBlock) {
+    log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Beginning digest of block " + Block.getId().toString());
+    
     block newBlock = Block;
+
+    log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Checking for previous block");
 
     const std::string idAsString = newBlock.getId().toString();
     //Check block does not already exist
@@ -418,11 +422,15 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
             return std::make_tuple(false, true);
         }*/
 
+        log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Checking consensus rules");
+
         if(!consensus->checkConsensusRules(dbTx, newBlock, previousBlock)) {
             log->printf(LOG_LEVEL_INFO,
                         "blockchain::submitBlock(): Consensus rules cannot verify this block");
             return std::make_tuple(false, true);
         }
+
+        log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Checking if we need to reorg");
 
         const dbBlock tip = getBlockDB(dbTx, "tip");
         if(previousBlock.getId() != tip.getId()) {
@@ -458,10 +466,11 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
         std::vector<std::thread> threadsVec;
 
         for(const auto& tx : txs) {
-            threadsVec.push_back(std::thread([&]{
+            threadsVec.push_back(std::thread([&, nTx]{
                 if(!std::get<0>(verifyTransaction(dbTx, tx))) {
                     failure = true;
                 }
+                log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): verified tx " + std::to_string(nTx+1) + " of " + std::to_string(txs.size()));
             }));
             nTx++;
 
@@ -479,6 +488,7 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
             }
         }
 
+        log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Verifying coinbase transaction");
 
         //Verify Transactions
         for(const transaction& tx : newBlock.getTransactions()) {
@@ -511,8 +521,12 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
         confirmTransaction(dbTx, newBlock.getCoinbaseTx(), newBlock.getId(), true);
 
         //Move transactions from unconfirmed to confirmed and add transaction utxos to db
+        nTx = 1;
+        const int nTxs = newBlock.getTransactions().size();
         for(const transaction& tx : newBlock.getTransactions()) {
+            log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Committing tx " + std::to_string(nTx) + " of " + std::to_string(nTxs));
             confirmTransaction(dbTx, tx, newBlock.getId());
+            nTx++;
         }
     }
 
@@ -521,6 +535,7 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
         jsonBlock["height"] = blockHeight;
         candidates->put(dbTx, newBlock.getId().toString(), jsonBlock);
     } else {
+        log->printf(LOG_LEVEL_INFO, "blockchain::submitBlock(): Committing block");
         const dbBlock toSave = dbBlock(newBlock, blockHeight);
         const Json::Value blockAsJson = toSave.toJson();
         candidates->erase(dbTx, idAsString);
@@ -537,7 +552,7 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
 
     log->printf(LOG_LEVEL_INFO,
                 "blockchain::submitBlock(): successfully submitted block: " +
-                CryptoKernel::Storage::toString(getBlockDB(dbTx, idAsString).toJson(), true));
+                newBlock.getId().toString());
 
     return std::make_tuple(true, false);
 }
@@ -545,12 +560,17 @@ std::tuple<bool, bool> CryptoKernel::Blockchain::submitBlock(Storage::Transactio
 void CryptoKernel::Blockchain::confirmTransaction(Storage::Transaction* dbTransaction,
         const transaction& tx, const BigNum& confirmingBlock, const bool coinbaseTx) {
     //Execute custom transaction rules callback
+
+    log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): confirming with consensus");
     if(!consensus->confirmTransaction(dbTransaction, tx)) {
         log->printf(LOG_LEVEL_ERR, "Consensus rules failed to confirm transaction");
     }
 
     //"Spend" UTXOs
+    unsigned int nTxo = 1;
+    unsigned int nTxos = tx.getInputs().size();
     for(const input& inp : tx.getInputs()) {
+        log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): spending UTXO " + std::to_string(nTxo) + " of " + std::to_string(nTxos));
         const std::string outputId = inp.getOutputId().toString();
         const Json::Value utxo = utxos->get(dbTransaction, outputId);
         const auto txoData = dbOutput(utxo).getData();
@@ -578,6 +598,8 @@ void CryptoKernel::Blockchain::confirmTransaction(Storage::Transaction* dbTransa
                 }
             }
 
+            log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): pubkey: " + txoData["publicKey"].asString() + " has " + std::to_string(newTxos.size()) + " txos");
+
             utxos->put(dbTransaction,
                        txoData["publicKey"].asString(),
                        newTxos,
@@ -587,16 +609,23 @@ void CryptoKernel::Blockchain::confirmTransaction(Storage::Transaction* dbTransa
         utxos->erase(dbTransaction, outputId);
 
         inputs->put(dbTransaction, inp.getId().toString(), dbInput(inp).toJson());
+        nTxo++;
     }
 
     //Add new outputs to UTXOs
+    nTxo = 1;
+    nTxos = tx.getOutputs().size();
     for(const output& out : tx.getOutputs()) {
+        log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): adding new UTXO " + std::to_string(nTxo) + " of " + std::to_string(nTxos));
         const auto txoData = out.getData();
         if(!txoData["publicKey"].isNull()) {
             Json::Value txos = utxos->get(dbTransaction,
                                           txoData["publicKey"].asString(),
                                           0);
             txos.append(out.getId().toString());
+
+            log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): pubkey: " + txoData["publicKey"].asString() + " has " + std::to_string(txos.size()) + " txos");
+
             utxos->put(dbTransaction,
                        txoData["publicKey"].asString(),
                        txos,
@@ -604,13 +633,17 @@ void CryptoKernel::Blockchain::confirmTransaction(Storage::Transaction* dbTransa
         }
 
         utxos->put(dbTransaction, out.getId().toString(), dbOutput(out, tx.getId()).toJson());
+        nTxo++;
     }
+
+    log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): Committing transaction");
 
     //Commit transaction
     transactions->put(dbTransaction, tx.getId().toString(), Blockchain::dbTransaction(tx,
                       confirmingBlock, coinbaseTx).toJson());
 
     //Remove transaction from unconfirmed transactions vector
+    log->printf(LOG_LEVEL_INFO, "blockchain::confirmTransaction(): Removing tx from mempool");
     std::lock_guard<std::mutex> lock(mempoolMutex);
     unconfirmedTransactions.remove(tx);
 }
