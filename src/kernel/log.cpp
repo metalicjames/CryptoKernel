@@ -41,12 +41,29 @@ CryptoKernel::Log::~Log() {
     logfilemutex.unlock();
 }
 
+template <typename Duration>
+std::string print_time(tm t, Duration fraction) {
+    using namespace std::chrono;
+    char out[30];
+    std::sprintf(&out[0],"[%04u-%02u-%02u %02u:%02u:%02u.%06u]", t.tm_year + 1900,
+                t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec,
+                static_cast<unsigned>(fraction / microseconds(1)));
+
+    // VS2013's library has a bug which may require you to replace
+    // "fraction / milliseconds(1)" with
+    // "duration_cast<milliseconds>(fraction).count()"
+    return std::string(out);
+}
+
 bool CryptoKernel::Log::printf(int loglevel, std::string message) {
-    std::chrono::system_clock::time_point today = std::chrono::system_clock::now();
-    time_t tt = std::chrono::system_clock::to_time_t(today);
-    std::string t(ctime(&tt));
+    auto now = std::chrono::system_clock::now();
+    auto tp = now.time_since_epoch();
+    tp -= std::chrono::duration_cast<std::chrono::seconds>(tp);
+    time_t tt = std::chrono::system_clock::to_time_t(now);
+    auto t = print_time(*localtime(&tt), tp);
+
     std::ostringstream stagingstream;
-    stagingstream << t.substr(0, t.length() - 1) << " ";
+    stagingstream << t << " ";
 
     switch(loglevel) {
     case LOG_LEVEL_ERR:
