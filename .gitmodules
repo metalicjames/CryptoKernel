@@ -1,0 +1,3 @@
+[submodule "pkgconfig"]
+	path = pkgconfig
+	url = https://github.com/tarruda/premake-pkgconfig

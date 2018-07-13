@@ -15,6 +15,18 @@ newoption {
     value = "DIR"
 }
 
+local pkgconfig = require 'pkgconfig'
+
+function loadPkg(pkgStr)
+    local configStr = pkgconfig.load(pkgStr)
+    if configStr == nil then
+        print(pkgStr .. " not found!")
+        os.exit()
+    end
+
+    return pkgconfig.parse(configStr)
+end
+
 workspace "CryptoKernel"
     configurations {"Debug", "Release"}
     platforms {"Static", "Shared"}
@@ -43,6 +55,11 @@ macLinks = {"lua", "curl"}
 
 function linkSystemSpecific()
     filter "system:linux"
+        -- OpenSSL >= 1.1.0
+        local openssl = loadPkg("leveldb")
+        
+
+
         links(linuxLinks)
 
     filter "system:windows"
